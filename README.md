@@ -1,6 +1,8 @@
 
 ## Go and the Secure Shell protocol
 
+http://blog.gopheracademy.com/go-and-ssh/
+
 See directories for SSH examples 
 
 #### MIT License
