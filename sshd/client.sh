@@ -1,2 +1,2 @@
 #!/bin/sh
-ssh foo@localhost -p 2022
+ssh foo@localhost -p 2200

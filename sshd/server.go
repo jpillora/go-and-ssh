@@ -85,49 +85,43 @@ func main() {
 
 		log.Printf("New SSH connection from %s (%s)", sshConn.RemoteAddr(), sshConn.ClientVersion())
 		// Discard all global out-of-band Requests
-		go handleRequests(reqs)
+		go ssh.DiscardRequests(reqs)
 		// Accept all channels
 		go handleChannels(chans)
 	}
 }
 
-func handleRequests(requests <-chan *ssh.Request) {
-	for req := range requests {
-		log.Printf("Recieved out-of-band request: %+v", req)
-	}
-}
-
 func handleChannels(chans <-chan ssh.NewChannel) {
-	// Service the incoming Channel channel.
+	// Service the incoming Channel channel in go routine
 	for newChannel := range chans {
-		// Since we're handling the execution of a shell, we expect a
-		// channel type of "session". However, there are also: "x11", "direct-tcpip"
-		// and "forwarded-tcpip" channel types.
-		if t := newChannel.ChannelType(); t != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, fmt.Sprintf("unknown channel type: %s", t))
-			continue
-		}
-
-		// At this point, we have the opportunity to reject the client's
-		// request for another logical connection
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			log.Printf("Could not accept channel (%s)", err)
-			continue
-		}
-
-		handleChannel(channel, requests)
+		go handleChannel(newChannel)
 	}
 }
 
-func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request) {
+func handleChannel(newChannel ssh.NewChannel) {
+	// Since we're handling a shell, we expect a
+	// channel type of "session". The also describes
+	// "x11", "direct-tcpip" and "forwarded-tcpip"
+	// channel types.
+	if t := newChannel.ChannelType(); t != "session" {
+		newChannel.Reject(ssh.UnknownChannelType, fmt.Sprintf("unknown channel type: %s", t))
+		return
+	}
 
-	// fire up bash for this session
+	// At this point, we have the opportunity to reject the client's
+	// request for another logical connection
+	connection, requests, err := newChannel.Accept()
+	if err != nil {
+		log.Printf("Could not accept channel (%s)", err)
+		return
+	}
+
+	// Fire up bash for this session
 	bash := exec.Command("bash")
 
-	// prepare teardown function
+	// Prepare teardown function
 	close := func() {
-		channel.Close()
+		connection.Close()
 		_, err := bash.Process.Wait()
 		if err != nil {
 			log.Printf("Failed to exit bash (%s)", err)
@@ -135,7 +129,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request) {
 		log.Printf("Session closed")
 	}
 
-	// allocate a terminal for this channel
+	// Allocate a terminal for this channel
 	log.Print("Creating pty...")
 	bashf, err := pty.Start(bash)
 	if err != nil {
@@ -143,6 +137,17 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request) {
 		close()
 		return
 	}
+
+	//pipe session to bash and visa-versa
+	var once sync.Once
+	go func() {
+		io.Copy(connection, bashf)
+		once.Do(close)
+	}()
+	go func() {
+		io.Copy(bashf, connection)
+		once.Do(close)
+	}()
 
 	// Sessions have out-of-band requests such as "shell", "pty-req" and "env"
 	go func() {
@@ -165,22 +170,8 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request) {
 				w, h := parseDims(req.Payload)
 				SetWinsize(bashf.Fd(), w, h)
 			}
-
 		}
 	}()
-
-	//pipe session to bash and visa-versa
-	var once sync.Once
-	go func() {
-		io.Copy(channel, bashf)
-		once.Do(close)
-	}()
-	go func() {
-		io.Copy(bashf, channel)
-		once.Do(close)
-	}()
-
-	//*important* - does not block
 }
 
 // =======================
